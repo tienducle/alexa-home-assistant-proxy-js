@@ -1,83 +1,99 @@
-import https from 'https';
-import {URL} from 'url';
+import {URL} from "url";
 
 /**
- * LOG_LEVEL: error|debug
+ * HOME_ASSISTANT_URL: <scheme>://<host>:[port]
+ *
+ * If no port is specified, default ports will be used
+ * depending on specified scheme (http: 80, https: 443).
  */
-const logLevel = process.env.LOG_LEVEL ? process.env.LOG_LEVEL.toLowerCase() : "error";
+const HOME_ASSISTANT_URL = process.env.HOME_ASSISTANT_URL;
+const HOME_ASSISTANT_ALEXA_SMART_HOME_PATH = "/api/alexa/smart_home";
+
+/**
+ * DEBUG_LOGS_ENABLED: true|false
+ *
+ * If true, debug logs will be enabled.
+ */
+const DEBUG_LOGS_ENABLED = process.env.DEBUG_LOGS_ENABLED === "true";
+
+/**
+ * DEBUG_HOME_ASSISTANT_LLA_TOKEN: <token>
+ *
+ * Home Assistant Long-lived access token, without "Bearer " prefix.
+ * Should only be used when testing the Lambda function.
+ */
+const DEBUG_HOME_ASSISTANT_LLA_TOKEN = process.env.DEBUG_HOME_ASSISTANT_LLA_TOKEN;
+
+let app;
+
+export const handler = async ( lambdaTriggerPayload, context ) => {
+    if ( !app ) {
+        app = new App(HOME_ASSISTANT_URL);
+    }
+    return app.handle( lambdaTriggerPayload, context );
+}
 
 export class App {
 
     /**
      * @param url {URL|string}
-     * @param debugToken {string}
      */
-    constructor(url, debugToken) {
+    constructor(url) {
 
-        console.debug(`Initializing app with url: ${url}`);
+        if ( DEBUG_LOGS_ENABLED ) {
+            console.debug(`Initializing app with url '${url}'`);
+        }
 
-        this.url = (typeof url === "string") ? new URL(url) : url;
-        this.debugToken = debugToken;
-        this.httpOptions = {
-            protocol: this.url.protocol,
-            hostname: this.url.hostname,
-            port: this.url.port ? this.url.port : this.url.protocol === "https:" ? "443" : "80",
-            path: "/api/alexa/smart_home",
-            rejectUnauthorized: process.env.IGNORE_SSL_VALIDATION !== "true",
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'User-Agent': process.env.CUSTOM_USER_AGENT || "HomeAssistantProxy"
-            }
-        };
+        const parsedUrl = (typeof url === "string") ? new URL(url) : url;
+        const port = parsedUrl.port ? parsedUrl.port : parsedUrl.protocol === "https:" ? "443" : "80";
+
+        this.url = `${parsedUrl.protocol}//${parsedUrl.hostname}:${port}${HOME_ASSISTANT_ALEXA_SMART_HOME_PATH}`;
     }
 
     /**
      * Forwards the trigger payload to Home Assistant and returns its response.
      *
-     * @param lambdaTriggerPayload
-     * @return {Promise<*>}
+     * @param lambdaTriggerPayload {object}
+     * @param context {object}
+     * @return {object}
      */
     async handle(lambdaTriggerPayload, context) {
-        if (logLevel === "debug") {
-            console.debug(`Lambda triggered by: '${JSON.stringify(this.getRedactedPayload(lambdaTriggerPayload))}'`);
+        if ( DEBUG_LOGS_ENABLED ) {
+            console.debug(`Lambda triggered by: '${this.getRedactedPayloadForLogging(lambdaTriggerPayload)}'`);
         }
 
-        const token = this.getToken(lambdaTriggerPayload);
-        if (!token) {
-            return {
-                statusCode: 401, body: "No token provided."
-            };
+        let token = this.getToken(lambdaTriggerPayload);
+        if ( !token ) {
+            console.warn("No token found in lambda trigger payload. Will use debug token.");
+            token = DEBUG_HOME_ASSISTANT_LLA_TOKEN;
+        }
+        if ( !token ) {
+            console.error("No token found in lambda trigger payload and no debug token is set. Aborting.");
+            return { statusCode: 401, body: "No token found in lambda trigger payload and no debug token is set." };
         }
 
-        const response = await this.postRequest(token, lambdaTriggerPayload);
-        if (logLevel === "debug") {
-            console.debug(`Home Assistant response: '${JSON.stringify(this.getRedactedPayload(response))}'`);
-        }
-
-        return (response.statusCode >= 400) ? response : JSON.parse(response.body);
+        return this.postRequest( token, lambdaTriggerPayload )
+            .then( response => response.status < 400
+                ? response.json()
+                : response.text()
+                    .then( responseText => {
+                        console.error(`Home Assistant HTTP ${response.status} response: '${responseText}'`);
+                        return { statusCode: response.status, body: responseText }
+                    })
+            );
     }
 
     /**
      * Returns the token from the given lambda trigger payload.
      * If no token is provided, the debug token is used.
+     *
      * @param lambdaTriggerPayload
      * @return {*|string}
      */
     getToken(lambdaTriggerPayload) {
         const directive = lambdaTriggerPayload?.directive;
         const scope = directive?.endpoint?.scope || directive?.payload?.grantee || directive?.payload?.scope;
-        if (scope?.token) {
-            return scope.token;
-        }
-
-        console.warn("No token found in lambda trigger payload. Will use debug token.");
-        if (this.debugToken) {
-            return this.debugToken;
-        }
-
-        console.error("DEBUG_HOME_ASSISTANT_LLA_TOKEN not set");
-        return undefined;
+        return scope?.token;
     }
 
     /**
@@ -89,20 +105,16 @@ export class App {
      * - homeAssistantResponse.body.event.endpoint.scope.token
      *
      * @param payload {object}
-     * @return {object}
+     * @return {string}
      */
-    getRedactedPayload(payload) {
+    getRedactedPayloadForLogging(payload) {
         const payloadCopy = JSON.parse(JSON.stringify(payload));
         this.redact(payloadCopy?.directive?.header, "correlationToken");
         this.redact(payloadCopy?.directive?.endpoint?.scope, "token");
         this.redact(payloadCopy?.directive?.payload?.scope, "token");
-        if (payloadCopy?.body) {
-            const body = JSON.parse(payloadCopy.body);
-            this.redact(body.event?.header, "correlationToken");
-            this.redact(body.event?.endpoint?.scope, "token");
-            payloadCopy.body = JSON.stringify(body);
-        }
-        return payloadCopy;
+        this.redact(payloadCopy?.event?.header, "correlationToken");
+        this.redact(payloadCopy?.event?.endpoint?.scope, "token");
+        return JSON.stringify(payloadCopy);
     }
 
     /**
@@ -118,36 +130,25 @@ export class App {
     }
 
     /**
-     * Sends a POST request using the given authToken and payload
+     * Sends a POST request using the given authToken and payload.
      *
-     * @param authToken {string}
-     * @param payload {object}
-     *
-     * @return {Promise<>}
+     * @param authToken
+     * @param payload
+     * @returns {Promise<Response>}
      */
     async postRequest(authToken, payload) {
-        this.httpOptions.headers.Authorization = `Bearer ${authToken}`;
-        return new Promise((resolve, reject) => {
-            const request = https.request(this.httpOptions, (response) => {
-                let data = '';
-
-                response.on('data', (chunk) => {
-                    data += chunk;
-                });
-
-                response.on('end', () => {
-                    resolve({
-                        statusCode: response.statusCode, headers: response.headers, body: data
-                    });
-                });
-            });
-
-            request.on('error', (error) => {
-                reject(error);
-            });
-
-            request.write(JSON.stringify(payload));
-            request.end();
-        });
+        const options = {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${authToken}`,
+                'Content-Type': 'application/json',
+                'User-Agent': process.env.CUSTOM_USER_AGENT || "HomeAssistantProxy",
+            }
+        };
+        if ( payload ) {
+            options.body = JSON.stringify(payload);
+            options.headers['Content-Length'] = Buffer.byteLength(options.body);
+        }
+        return fetch(this.url, options);
     }
 }

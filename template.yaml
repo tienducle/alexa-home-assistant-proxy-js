@@ -6,47 +6,45 @@ Description: >
 # More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
 Globals:
   Function:
-    Timeout: 3
+    Timeout: 30
     MemorySize: 2048
 
 Parameters:
-    LogLevel:
-        Type: String
-        Default: error
-        AllowedValues:
-        - error
-        - warn
-        - info
-        - debug
-    HomeAssistantUrl:
-        Type: String
-        Default: https://myhost.com
-    DebugHomeAssistantLlaToken:
-        Type: String
-        Default: ''
-        NoEcho: True
-    IgnoreSslValidation:
-        Type: String
-        Default: 'false'
-        AllowedValues:
-        - 'true'
-        - 'false'
+  HomeAssistantUrl:
+    Type: String
+    Default: https://myhost.com
+  DebugLogsEnabled:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+    - 'true'
+    - 'false'
+  DebugHomeAssistantLlaToken:
+    Type: String
+    Default: ''
+    NoEcho: True
+  TlsValidation:
+    Type: Number
+    Default: '1'
+    AllowedValues:
+    - '1'
+    - '0'
 
 Resources:
   HomeAssistantProxy:
     Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
     Properties:
       CodeUri: src/
-      Handler: index.handler
+      Handler: app.handler
       Runtime: nodejs20.x
       Architectures:
       - x86_64
       Environment:
         Variables:
-          LOG_LEVEL: !Ref LogLevel
           HOME_ASSISTANT_URL: !Ref HomeAssistantUrl
+          DEBUG_LOGS_ENABLED: !Ref DebugLogsEnabled
           DEBUG_HOME_ASSISTANT_LLA_TOKEN: !Ref DebugHomeAssistantLlaToken
-          IGNORE_SSL_VALIDATION: !Ref IgnoreSslValidation
+          NODE_TLS_REJECT_UNAUTHORIZED: !Ref TlsValidation
 
   HomeAssistantProxyLogGroup:
     Type: AWS::Logs::LogGroup

@@ -20,6 +20,6 @@ resolve_s3 = true
 region = "eu-west-1"
 image_repositories = []
 parameter_overrides = [
-    "LogLevel=error",
+    "LogLevel=warn",
     "HomeAssistantUrl=https://myhost.com"
 ]
