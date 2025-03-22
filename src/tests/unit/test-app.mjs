@@ -1,4 +1,4 @@
-import {App} from "../../app.mjs";
+import {App} from "../../index.mjs";
 import {expect} from "chai";
 
 describe("App tests", () => {
